@@ -1,0 +1,1538 @@
+PAGATEC — Phase 2: Database Design Document
+Version: 1.0
+Date: 2026-07-30
+Owner: Yeney B. Herrera, CEO TECCEF.CORP
+Status: Pending Approval
+1. Design Principles
+Every table in PAGATEC follows these non-negotiable rules:
+UUID Primary Keys: id String @id @default(uuid()) — prevents collision when devices create records offline.
+Audit Columns: Every table has createdAt, updatedAt, createdBy, updatedBy.
+Optimistic Locking: Every table has version Int @default(1) for conflict detection during sync.
+Soft Deletes: Every table has deletedAt DateTime? — business data is never hard-deleted.
+Tenant Isolation: Every table has businessId String — every query is scoped to one business.
+Store/Warehouse Scoping: Where applicable, storeId and warehouseId enforce data boundaries.
+2. Core & Shared Tables
+2.1 Business
+The root tenant. Every customer account owns one Business.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+name	String	255 chars, not null
+legalName	String?	255 chars
+taxId	String?	RFC format
+address	String?	500 chars
+phone	String?	20 chars
+email	String?	valid email
+logoUrl	String?	S3 URL
+currency	String	default "MXN"
+timezone	String	default "America/Mexico_City"
+language	String	default "es-MX"
+isActive	Boolean	default true
+subscriptionTier	String	"free", "basic", "pro", "enterprise"
+subscriptionExpiresAt	DateTime?	
+maxStores	Int	default 1
+maxUsers	Int	default 3
+maxProducts	Int	default 1000
+createdAt	DateTime	default now()
+updatedAt	DateTime	updated automatically
+createdBy	String	UUID of user
+updatedBy	String	UUID of user
+version	Int	default 1
+deletedAt	DateTime?	soft delete
+Indexes: taxId (unique per active business), isActive, subscriptionTier
+2.2 Store
+A physical location. One Business has many Stores.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	not null
+address	String?	
+phone	String?	
+email	String?	
+isActive	Boolean	default true
+settings	Json?	store-specific overrides
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId, isActive
+2.3 Warehouse
+Storage location within a Store. One Store has many Warehouses.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+name	String	not null
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: storeId, businessId
+2.4 User (Employee)
+System users. Not "customers."
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID?	FK -> Store (optional, for store-scoped users)
+email	String	unique per business, not null
+passwordHash	String	bcrypt, not null
+firstName	String	not null
+lastName	String	not null
+phone	String?	
+avatarUrl	String?	
+isActive	Boolean	default true
+lastLoginAt	DateTime?	
+passwordChangedAt	DateTime?	
+failedLoginAttempts	Int	default 0
+lockedUntil	DateTime?	
+mfaEnabled	Boolean	default false
+mfaSecret	String?	encrypted
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + email (unique), isActive, storeId
+2.5 Role
+Predefined and custom roles.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	not null
+description	String?	
+isSystem	Boolean	default false (true for Owner, Manager, Cashier, etc.)
+permissions	Json	array of permission strings
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId, isSystem
+2.6 UserRole
+Many-to-many join.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+userId	UUID	FK -> User
+roleId	UUID	FK -> Role
+businessId	UUID	FK -> Business
+assignedAt	DateTime	default now()
+assignedBy	String	UUID of admin
+createdAt	DateTime	
+updatedAt	DateTime	
+version	Int	default 1
+Indexes: userId + roleId (unique), businessId
+2.7 AuditLog
+Immutable record of every mutation.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+userId	UUID?	FK -> User (nullable for system actions)
+action	String	CREATE, UPDATE, DELETE, LOGIN, LOGOUT, EXPORT
+entityType	String	table name
+entityId	String	UUID of affected record
+oldValue	Json?	before state
+newValue	Json?	after state
+ipAddress	String?	
+userAgent	String?	
+metadata	Json?	extra context
+createdAt	DateTime	
+createdBy	String	
+Indexes: businessId + entityType + entityId, businessId + userId, businessId + action, createdAt (desc)
+Constraint: No updatedAt, updatedBy, deletedAt — audit logs are append-only forever.
+3. Inventory Module
+3.1 Category
+Product categorization, hierarchical.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+parentId	UUID?	FK -> Category (self-referencing)
+name	String	not null
+description	String?	
+color	String?	hex color for UI
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + parentId, businessId + name (unique per active)
+3.2 UnitOfMeasure
+kg, g, L, ml, piece, box, dozen, etc.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	not null
+abbreviation	String	not null
+isBaseUnit	Boolean	default true
+baseUnitId	UUID?	FK -> UnitOfMeasure
+conversionFactor	Decimal?	e.g., 1 box = 24 pieces
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+3.3 Product
+The central entity.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+categoryId	UUID?	FK -> Category
+baseUnitId	UUID	FK -> UnitOfMeasure
+sku	String	not null
+name	String	not null
+description	String?	
+costPrice	Decimal	default 0, precision 19, scale 4
+salePrice	Decimal	default 0, precision 19, scale 4
+taxRateId	UUID?	FK -> TaxRate
+isTaxExempt	Boolean	default false
+minStock	Decimal	default 0, scale 4
+maxStock	Decimal?	scale 4
+initialQuantity	Decimal	default 0, scale 4
+trackExpiration	Boolean	default false
+trackSerial	Boolean	default false
+trackBatch	Boolean	default false
+isActive	Boolean	default true
+isVariant	Boolean	default false
+parentProductId	UUID?	FK -> Product
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + sku (unique per active), businessId + name, businessId + categoryId, businessId + isActive
+3.4 ProductVariant
+Size, color, flavor variants of a parent product.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product (parent)
+variantName	String	not null (e.g., "Large", "Red")
+sku	String?	
+barcode	String?	
+salePrice	Decimal?	override parent price
+costPrice	Decimal?	override parent cost
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: productId, businessId + barcode (unique per active)
+3.5 Barcode
+One product can have multiple barcodes (EAN-13, UPC-A, internal codes).
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+barcode	String	not null
+barcodeType	String	"EAN13", "UPCA", "CODE128", "INTERNAL"
+isPrimary	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + barcode (unique per active), productId
+3.6 ProductImage
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product
+url	String	not null (S3/MinIO)
+isPrimary	Boolean	default false
+sortOrder	Int	default 0
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+3.7 ProductSupplier
+Link products to suppliers with supplier-specific codes and costs.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product
+supplierId	UUID	FK -> Supplier
+supplierSku	String?	
+supplierCost	Decimal?	precision 19, scale 4
+leadTimeDays	Int?	
+isPreferred	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: productId + supplierId (unique)
+3.8 StockLevel
+Current quantity per product per warehouse. This is the "live" inventory.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+warehouseId	UUID	FK -> Warehouse
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+quantity	Decimal	default 0, precision 19, scale 4
+reservedQuantity	Decimal	default 0, scale 4 (for pending orders)
+availableQuantity	Decimal	computed: quantity - reserved
+reorderPoint	Decimal?	scale 4
+reorderQuantity	Decimal?	scale 4
+lastCountedAt	DateTime?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + warehouseId + productId + variantId (unique), businessId + productId, quantity (for low-stock queries)
+3.9 InventoryMovement
+Every change to stock level is recorded here. Immutable.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+warehouseId	UUID	FK -> Warehouse
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+movementType	String	"IN", "OUT", "ADJUSTMENT", "TRANSFER_IN", "TRANSFER_OUT"
+quantity	Decimal	scale 4
+unitCost	Decimal?	cost at time of movement
+referenceType	String?	"SALE", "PURCHASE", "ADJUSTMENT", "TRANSFER", "RETURN"
+referenceId	String?	UUID of source transaction
+notes	String?	
+createdAt	DateTime	
+createdBy	String	
+Indexes: businessId + warehouseId + productId, businessId + movementType, businessId + referenceType + referenceId, createdAt (desc)
+3.10 StockAdjustment
+Authorized correction of inventory.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+warehouseId	UUID	FK -> Warehouse
+adjustmentDate	DateTime	not null
+status	String	"PENDING", "APPROVED", "REJECTED"
+approvedBy	String?	UUID of approver
+approvedAt	DateTime?	
+totalVariance	Decimal	sum of all item variances
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+3.11 StockAdjustmentItem
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+adjustmentId	UUID	FK -> StockAdjustment
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+systemQuantity	Decimal	scale 4
+actualQuantity	Decimal	scale 4
+variance	Decimal	scale 4
+reasonCode	String	"PHYSICAL_COUNT", "DAMAGE", "THEFT", "EXPIRATION", "OTHER"
+reasonNote	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+3.12 StockCount
+Planned physical inventory count event.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+warehouseId	UUID	FK -> Warehouse
+countDate	DateTime	
+status	String	"PLANNED", "IN_PROGRESS", "COMPLETED", "CANCELLED"
+startedAt	DateTime?	
+completedAt	DateTime?	
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+3.13 StockCountItem
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+stockCountId	UUID	FK -> StockCount
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+expectedQuantity	Decimal	scale 4
+countedQuantity	Decimal?	scale 4
+variance	Decimal?	scale 4
+countedBy	String?	UUID of counter
+countedAt	DateTime?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+3.14 ExpirationAlert
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+warehouseId	UUID	FK -> Warehouse
+productId	UUID	FK -> Product
+batchNumber	String?	
+expirationDate	DateTime	
+alertDays	Int	30, 15, or 7
+isAcknowledged	Boolean	default false
+acknowledgedBy	String?	
+acknowledgedAt	DateTime?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + expirationDate, businessId + isAcknowledged
+3.15 SerialNumber
+For high-value item tracking.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product
+serialNumber	String	not null
+status	String	"IN_STOCK", "SOLD", "RETURNED", "DEFECTIVE"
+purchaseTransactionId	String?	
+saleTransactionId	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + productId + serialNumber (unique)
+3.16 BatchLot
+For regulated industries (pharmacy, food).
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product
+batchNumber	String	not null
+expirationDate	DateTime?	
+manufactureDate	DateTime?	
+initialQuantity	Decimal	scale 4
+remainingQuantity	Decimal	scale 4
+supplierId	UUID?	FK -> Supplier
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + productId + batchNumber (unique)
+4. POS Module
+4.1 POSTransaction
+The sale itself.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+warehouseId	UUID	FK -> Warehouse
+posStationId	String?	identifier of physical terminal
+shiftId	UUID?	FK -> Shift
+customerId	UUID?	FK -> Customer
+transactionNumber	String	auto-generated, unique per business
+transactionDate	DateTime	default now()
+subtotal	Decimal	precision 19, scale 4
+discountTotal	Decimal	default 0, scale 4
+taxTotal	Decimal	default 0, scale 4
+total	Decimal	precision 19, scale 4
+paymentStatus	String	"PAID", "PARTIAL", "PENDING", "CANCELLED"
+isOffline	Boolean	default false
+syncStatus	String	"SYNCED", "PENDING", "CONFLICT"
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + transactionNumber (unique), businessId + storeId + transactionDate, businessId + customerId, businessId + syncStatus
+4.2 POSTransactionItem
+Individual line items.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+transactionId	UUID	FK -> POSTransaction
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+quantity	Decimal	scale 4
+unitPrice	Decimal	scale 4
+unitCost	Decimal?	scale 4 (for margin calc)
+discountAmount	Decimal	default 0, scale 4
+taxAmount	Decimal	default 0, scale 4
+total	Decimal	scale 4
+isReturned	Boolean	default false
+returnedQuantity	Decimal	default 0, scale 4
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+4.3 Payment
+Payment records per transaction.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+transactionId	UUID	FK -> POSTransaction
+paymentMethod	String	"CASH", "CARD", "TRANSFER", "FIADO", "MIXED"
+amount	Decimal	scale 4
+referenceNumber	String?	card auth code, transfer ref, etc.
+isReconciled	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+4.4 Shift
+Cashier shift management.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+userId	UUID	FK -> User
+posStationId	String?	
+openedAt	DateTime	
+closedAt	DateTime?	
+startingCash	Decimal	scale 4
+expectedCash	Decimal?	scale 4
+actualCash	Decimal?	scale 4
+cashVariance	Decimal?	scale 4
+totalSales	Decimal?	default 0, scale 4
+totalReturns	Decimal?	default 0, scale 4
+totalVoids	Decimal?	default 0, scale 4
+totalDiscounts	Decimal?	default 0, scale 4
+status	String	"OPEN", "CLOSED", "VARIANCE"
+closedBy	String?	UUID of closer (if not same user)
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + storeId + userId + status, businessId + openedAt
+4.5 Return
+Customer returns.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+originalTransactionId	UUID	FK -> POSTransaction
+customerId	UUID?	FK -> Customer
+returnNumber	String	unique per business
+returnDate	DateTime	
+subtotal	Decimal	scale 4
+taxTotal	Decimal	scale 4
+total	Decimal	scale 4
+refundMethod	String	"CASH", "CARD", "CREDIT"
+status	String	"PENDING", "APPROVED", "COMPLETED", "REJECTED"
+reason	String?	
+approvedBy	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+4.6 ReturnItem
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+returnId	UUID	FK -> Return
+originalTransactionItemId	UUID	FK -> POSTransactionItem
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+quantity	Decimal	scale 4
+unitPrice	Decimal	scale 4
+refundAmount	Decimal	scale 4
+condition	String?	"RESALABLE", "DAMAGED", "DEFECTIVE"
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+4.7 Discount
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	
+discountType	String	"PERCENTAGE", "FIXED_AMOUNT"
+value	Decimal	scale 4
+minPurchaseAmount	Decimal?	
+maxDiscountAmount	Decimal?	
+startDate	DateTime?	
+endDate	DateTime?	
+isActive	Boolean	default true
+appliesTo	String	"ALL", "CATEGORY", "PRODUCT"
+targetId	String?	category or product UUID
+requiresApproval	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+4.8 Promotion
+Buy X Get Y, bundle pricing.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	not null
+promotionType	String	"BUY_X_GET_Y", "BUNDLE", "THRESHOLD_DISCOUNT"
+description	String?	
+startDate	DateTime	
+endDate	DateTime	
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+4.9 PromotionItem
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+promotionId	UUID	FK -> Promotion
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+quantityRequired	Int	default 1
+quantityFree	Int	default 0
+discountPercent	Decimal?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+5. Purchasing Module
+5.1 PurchaseOrder
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+supplierId	UUID	FK -> Supplier
+warehouseId	UUID	FK -> Warehouse
+poNumber	String	unique per business
+orderDate	DateTime	
+expectedDeliveryDate	DateTime?	
+status	String	"DRAFT", "SENT", "PARTIAL", "RECEIVED", "CANCELLED"
+subtotal	Decimal	scale 4
+taxTotal	Decimal	scale 4
+total	Decimal	scale 4
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + poNumber (unique), businessId + supplierId, businessId + status
+5.2 PurchaseOrderItem
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+purchaseOrderId	UUID	FK -> PurchaseOrder
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+quantityOrdered	Decimal	scale 4
+quantityReceived	Decimal	default 0, scale 4
+unitPrice	Decimal	scale 4
+total	Decimal	scale 4
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+5.3 GoodsReceipt
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+warehouseId	UUID	FK -> Warehouse
+purchaseOrderId	UUID?	FK -> PurchaseOrder
+supplierId	UUID	FK -> Supplier
+receiptNumber	String	unique per business
+receiptDate	DateTime	
+status	String	"PENDING", "COMPLETED", "DISCREPANCY"
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+5.4 GoodsReceiptItem
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+goodsReceiptId	UUID	FK -> GoodsReceipt
+purchaseOrderItemId	UUID?	FK -> PurchaseOrderItem
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+quantityExpected	Decimal?	scale 4
+quantityReceived	Decimal	scale 4
+unitCost	Decimal	scale 4
+totalCost	Decimal	scale 4
+batchNumber	String?	
+expirationDate	DateTime?	
+discrepancy	Decimal?	scale 4
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+5.5 SupplierInvoice
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+supplierId	UUID	FK -> Supplier
+purchaseOrderId	UUID?	FK -> PurchaseOrder
+invoiceNumber	String	
+invoiceDate	DateTime	
+dueDate	DateTime?	
+subtotal	Decimal	scale 4
+taxTotal	Decimal	scale 4
+total	Decimal	scale 4
+amountPaid	Decimal	default 0, scale 4
+balanceDue	Decimal	scale 4
+status	String	"PENDING", "PARTIAL", "PAID", "OVERDUE"
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+6. Customer, Supplier & Fiado Module
+6.1 Customer
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID?	FK -> Store (if store-specific customer base)
+customerNumber	String	unique per business
+firstName	String	
+lastName	String	
+email	String?	
+phone	String?	
+address	String?	
+taxId	String?	RFC
+birthDate	DateTime?	
+notes	String?	
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + customerNumber (unique), businessId + phone, businessId + taxId
+6.2 CustomerSegment
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	
+description	String?	
+criteria	Json?	rules for auto-segmentation
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+6.3 CustomerCreditLimit (Fiado Master)
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+customerId	UUID	FK -> Customer
+creditLimit	Decimal	default 1000, scale 4
+currentBalance	Decimal	default 0, scale 4
+availableCredit	Decimal	computed: limit - balance
+interestRate	Decimal?	monthly %, default 2
+gracePeriodDays	Int	default 30
+terms	String?	
+isActive	Boolean	default true
+approvedBy	String	UUID of approver
+approvedAt	DateTime	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + customerId (unique)
+6.4 CreditTransaction
+Every fiado sale creates a credit transaction.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+customerId	UUID	FK -> Customer
+creditLimitId	UUID	FK -> CustomerCreditLimit
+transactionType	String	"CHARGE", "PAYMENT", "INTEREST", "ADJUSTMENT"
+referenceType	String?	"SALE", "MANUAL", "STATEMENT"
+referenceId	String?	
+amount	Decimal	scale 4
+balanceAfter	Decimal	scale 4
+dueDate	DateTime?	
+isOverdue	Boolean	default false
+daysOverdue	Int?	
+notes	String?	
+createdAt	DateTime	
+createdBy	String	
+Indexes: businessId + customerId, businessId + isOverdue, businessId + dueDate
+6.5 FiadoPayment
+Payments against credit balance.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+customerId	UUID	FK -> Customer
+paymentDate	DateTime	
+amount	Decimal	scale 4
+paymentMethod	String	"CASH", "CARD", "TRANSFER"
+referenceNumber	String?	
+appliedToTransactions	Json?	array of {creditTransactionId, amount}
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+6.6 CustomerStatement
+Monthly statement generation record.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+customerId	UUID	FK -> Customer
+statementDate	DateTime	
+periodStart	DateTime	
+periodEnd	DateTime	
+openingBalance	Decimal	scale 4
+totalCharges	Decimal	scale 4
+totalPayments	Decimal	scale 4
+closingBalance	Decimal	scale 4
+isDelivered	Boolean	default false
+deliveredAt	DateTime?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+6.7 Supplier
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+supplierNumber	String	unique per business
+name	String	not null
+contactName	String?	
+email	String?	
+phone	String?	
+address	String?	
+taxId	String?	
+paymentTerms	String?	"CONTADO", "15_DIAS", "30_DIAS", "60_DIAS"
+leadTimeDays	Int?	
+isActive	Boolean	default true
+rating	Decimal?	1-5 scale
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + supplierNumber (unique), businessId + name
+6.8 SupplierContact
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+supplierId	UUID	FK -> Supplier
+name	String	
+email	String?	
+phone	String?	
+isPrimary	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+6.9 SupplierRating
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+supplierId	UUID	FK -> Supplier
+rating	Int	1-5
+criteria	String?	"QUALITY", "PRICE", "DELIVERY", "SERVICE"
+notes	String?	
+createdAt	DateTime	
+createdBy	String	
+7. Financial & Reporting Module
+7.1 TaxRate
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	"IVA 16%", "IVA 0%", "EXENTO"
+rate	Decimal	scale 4 (0.16, 0.00)
+isDefault	Boolean	default false
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + name (unique per active)
+7.2 TaxConfig
+Business-level tax settings.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+defaultTaxRateId	UUID?	FK -> TaxRate
+includeTaxInPrice	Boolean	default false (Mexico: tax added at register)
+fiscalRegime	String?	"GENERAL", "INTERMEDIO", "SIMPLIFICADO"
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+7.3 ExpenseCategory
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	
+description	String?	
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+7.4 Expense
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID?	FK -> Store
+categoryId	UUID?	FK -> ExpenseCategory
+expenseDate	DateTime	
+amount	Decimal	scale 4
+description	String?	
+receiptUrl	String?	
+isRecurring	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+7.5 DailyClosing
+End-of-day financial snapshot per store.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+closingDate	DateTime	
+totalSales	Decimal	scale 4
+totalPurchases	Decimal	scale 4
+totalExpenses	Decimal	scale 4
+totalTaxes	Decimal	scale 4
+netProfit	Decimal	scale 4
+transactionCount	Int	
+createdAt	DateTime	
+createdBy	String	
+8. AI Module
+8.1 AIQuery
+Log of every AI interaction.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+userId	UUID	FK -> User
+queryText	String	not null
+intent	String?	classified intent
+confidence	Decimal?	0-1
+responseText	String?	
+dataSources	Json?	array of referenced record IDs
+executionTimeMs	Int?	
+wasHelpful	Boolean?	user feedback
+createdAt	DateTime	
+createdBy	String	
+8.2 AIInsight
+Pre-computed insights.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+insightType	String	"REORDER", "DEAD_STOCK", "MARGIN_ALERT", "TREND"
+title	String	
+description	String	
+severity	String	"INFO", "WARNING", "CRITICAL"
+relatedEntityType	String?	
+relatedEntityId	String?	
+isRead	Boolean	default false
+readAt	DateTime?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+8.3 ProductEmbedding
+Vector embeddings for semantic search.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product
+embedding	Unsupported("vector(1536)")	pgvector type
+model	String	"text-embedding-3-small"
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+Index: embedding (pgvector HNSW index for similarity search)
+9. Sync & Offline Module
+9.1 SyncQueue
+Local device queue (also mirrored server-side for conflict tracking).
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+deviceId	String	
+userId	UUID	FK -> User
+action	String	"CREATE", "UPDATE", "DELETE"
+entityType	String	
+entityId	String	
+payload	Json	the actual data
+localTimestamp	DateTime	
+serverTimestamp	DateTime?	
+status	String	"PENDING", "SYNCED", "FAILED", "CONFLICT"
+retryCount	Int	default 0
+errorMessage	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+Indexes: businessId + deviceId + status, businessId + entityType + entityId
+9.2 SyncConflict
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+deviceId	String	
+entityType	String	
+entityId	String	
+localValue	Json	
+serverValue	Json	
+localTimestamp	DateTime	
+serverTimestamp	DateTime	
+resolvedValue	Json?	
+resolution	String?	"LOCAL", "SERVER", "MERGE"
+resolvedBy	String?	
+resolvedAt	DateTime?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+9.3 Device
+Registered devices per business.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+deviceId	String	unique hardware identifier
+deviceName	String?	
+deviceType	String?	"TABLET", "PHONE", "DESKTOP", "POS"
+lastSyncAt	DateTime?	
+lastSeenAt	DateTime?	
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+10. Settings & Notification Module
+10.1 BusinessSettings
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+receiptHeader	String?	
+receiptFooter	String?	
+receiptShowLogo	Boolean	default true
+receiptShowTaxDetails	Boolean	default true
+defaultLanguage	String	default "es-MX"
+defaultCurrency	String	default "MXN"
+dateFormat	String	default "DD/MM/YYYY"
+numberFormat	String	default "1,234.56"
+timeFormat	String	default "24H"
+theme	String	default "light"
+allowNegativeStock	Boolean	default false
+requireManagerApprovalFor	Json?	array of actions
+backupFrequency	String	default "DAILY"
+backupRetentionDays	Int	default 30
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+10.2 StoreSettings
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+receiptTemplateId	UUID?	FK -> ReceiptTemplate
+posSettings	Json?	quick keys, default payment, etc.
+inventorySettings	Json?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+10.3 ReceiptTemplate
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	
+headerHtml	String?	
+footerHtml	String?	
+cssOverrides	String?	
+isDefault	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+10.4 Notification
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+userId	UUID?	FK -> User (null = all users)
+storeId	UUID?	FK -> Store
+notificationType	String	"LOW_STOCK", "EXPIRATION", "SYNC_CONFLICT", "DAILY_SUMMARY"
+title	String	
+message	String	
+data	Json?	related record IDs
+isRead	Boolean	default false
+readAt	DateTime?	
+channel	String	"IN_APP", "EMAIL", "WHATSAPP"
+sentAt	DateTime?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+10.5 NotificationPreference
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+userId	UUID	FK -> User
+notificationType	String	
+inAppEnabled	Boolean	default true
+emailEnabled	Boolean	default false
+whatsappEnabled	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+11. Supporting Tables
+11.1 Currency
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+code	String	"MXN", "USD", "COP"
+name	String	
+symbol	String	
+decimalPlaces	Int	default 2
+isActive	Boolean	default true
+11.2 PriceHistory
+Track price changes over time.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+oldPrice	Decimal	scale 4
+newPrice	Decimal	scale 4
+changedAt	DateTime	
+changedBy	String	
+reason	String?	
+11.3 CostHistory
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+productId	UUID	FK -> Product
+variantId	UUID?	FK -> ProductVariant
+oldCost	Decimal	scale 4
+newCost	Decimal	scale 4
+supplierId	UUID?	
+changedAt	DateTime	
+changedBy	String	
+11.4 Recipe (Restaurant BOM)
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	
+description	String?	
+productId	UUID?	FK -> Product (the finished dish, if sold as product)
+yieldQuantity	Decimal	scale 4
+yieldUnitId	UUID	FK -> UnitOfMeasure
+totalCost	Decimal?	scale 4
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+11.5 RecipeIngredient
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+recipeId	UUID	FK -> Recipe
+productId	UUID	FK -> Product (ingredient)
+quantity	Decimal	scale 4
+unitId	UUID	FK -> UnitOfMeasure
+cost	Decimal?	scale 4
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+11.6 EmployeeSchedule
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+userId	UUID	FK -> User
+workDate	DateTime	
+startTime	DateTime	
+endTime	DateTime	
+isActive	Boolean	default true
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+11.7 EmployeeAttendance
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+storeId	UUID	FK -> Store
+userId	UUID	FK -> User
+clockInAt	DateTime	
+clockOutAt	DateTime?	
+clockInPhotoUrl	String?	
+clockOutPhotoUrl	String?	
+notes	String?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+11.8 ReportTemplate
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+name	String	
+reportType	String	"SALES", "INVENTORY", "FINANCIAL", "CUSTOM"
+filterConfig	Json?	
+sortConfig	Json?	
+columnConfig	Json?	
+isSystem	Boolean	default false
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+11.9 ReportExecution
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+templateId	UUID?	FK -> ReportTemplate
+reportType	String	
+parameters	Json?	date range, store, etc.
+status	String	"PENDING", "RUNNING", "COMPLETED", "FAILED"
+resultUrl	String?	S3 link to generated file
+recordCount	Int?	
+executionTimeMs	Int?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+11.10 ExportJob
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+exportType	String	"PRODUCTS", "CUSTOMERS", "SUPPLIERS", "TRANSACTIONS"
+format	String	"CSV", "EXCEL", "PDF"
+filterCriteria	Json?	
+status	String	"PENDING", "PROCESSING", "COMPLETED", "FAILED"
+fileUrl	String?	
+recordCount	Int?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+11.11 BackupLog
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+backupType	String	"AUTOMATIC", "MANUAL"
+status	String	"PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"
+fileUrl	String?	
+fileSize	Int?	bytes
+startedAt	DateTime	
+completedAt	DateTime?	
+errorMessage	String?	
+createdAt	DateTime	
+createdBy	String	
+11.12 ImportLog
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+businessId	UUID	FK -> Business
+importType	String	"PRODUCTS", "CUSTOMERS", "SUPPLIERS"
+fileUrl	String	
+status	String	"PENDING", "PROCESSING", "COMPLETED", "FAILED"
+totalRecords	Int?	
+successCount	Int?	
+errorCount	Int?	
+errorLog	Json?	
+createdAt	DateTime	
+updatedAt	DateTime	
+createdBy	String	
+updatedBy	String	
+version	Int	default 1
+deletedAt	DateTime?	
+12. Security & Session Tables
+12.1 Session
+Server-side session tracking.
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+userId	UUID	FK -> User
+token	String	JWT access token hash
+refreshToken	String	refresh token hash
+ipAddress	String?	
+userAgent	String?	
+expiresAt	DateTime	
+createdAt	DateTime	
+updatedAt	DateTime	
+12.2 PasswordReset
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+userId	UUID	FK -> User
+token	String	hashed
+expiresAt	DateTime	
+usedAt	DateTime?	
+createdAt	DateTime	
+12.3 LoginAttempt
+Hojas
+Column	Type	Constraints
+id	UUID	PK
+email	String	
+ipAddress	String	
+wasSuccessful	Boolean	
+failureReason	String?	
+createdAt	DateTime	
+13. Indexes & Performance Strategy
+13.1 Critical Composite Indexes
+Hojas
+Table	Index	Purpose
+Product	(businessId, sku)	Fast product lookup by SKU
+Product	(businessId, isActive, name)	POS search
+Barcode	(businessId, barcode)	Instant barcode scan resolution
+StockLevel	(businessId, warehouseId, productId, variantId)	Inventory check
+StockLevel	(businessId, quantity, minStock)	Low-stock alert query
+POSTransaction	(businessId, storeId, transactionDate)	Daily sales reports
+POSTransaction	(businessId, customerId)	Customer purchase history
+POSTransactionItem	(businessId, productId)	Product sales velocity
+InventoryMovement	(businessId, productId, createdAt)	Product movement history
+CustomerCreditLimit	(businessId, currentBalance, creditLimit)	Available credit check
+CreditTransaction	(businessId, customerId, createdAt)	Customer statement generation
+AuditLog	(businessId, entityType, entityId, createdAt)	Audit trail lookup
+SyncQueue	(businessId, deviceId, status)	Sync processing
+AIInsight	(businessId, isRead, severity)	Dashboard alerts
+13.2 Full-Text Search
+PostgreSQL tsvector columns on:
+Product.name + Product.description
+Customer.name + Customer.email + Customer.phone
+Supplier.name
+Enables fast natural-language search without external search engine.
+13.3 Partitioning Strategy (Phase 2+)
+AuditLog: Partition by createdAt month (rapid growth).
+InventoryMovement: Partition by createdAt month.
+POSTransaction: Partition by transactionDate month.
+CreditTransaction: Partition by createdAt month.
+14. Data Integrity Rules
+14.1 Check Constraints
+Product.salePrice >= 0
+Product.costPrice >= 0
+StockLevel.quantity >= 0 (unless BusinessSettings.allowNegativeStock = true)
+CustomerCreditLimit.creditLimit >= 0
+CustomerCreditLimit.currentBalance >= 0
+POSTransaction.total >= 0
+POSTransactionItem.quantity > 0
+Shift.startingCash >= 0
+14.2 Foreign Key Cascades
+Soft delete only. No ON DELETE CASCADE on business-critical tables.
+Business deletion: Soft delete cascades to all child records via application logic, not DB cascade.
+User deletion: Set deletedAt on User; preserve all historical records (transactions, audit logs) with original createdBy.
+14.3 Unique Constraints
+Business.taxId (per active business)
+Store.name (per business)
+Product.sku (per business, active only)
+Barcode.barcode (per business, active only)
+Customer.customerNumber (per business)
+Supplier.supplierNumber (per business)
+User.email (per business)
+Role.name (per business, if not system)
+15. Schema Summary
+Hojas
+Module	Tables	Count
+Core / Shared	Business, Store, Warehouse, User, Role, UserRole, AuditLog	7
+Inventory	Category, UnitOfMeasure, Product, ProductVariant, Barcode, ProductImage, ProductSupplier, StockLevel, InventoryMovement, StockAdjustment, StockAdjustmentItem, StockCount, StockCountItem, ExpirationAlert, SerialNumber, BatchLot	16
+POS	POSTransaction, POSTransactionItem, Payment, Shift, Return, ReturnItem, Discount, Promotion, PromotionItem	9
+Purchasing	PurchaseOrder, PurchaseOrderItem, GoodsReceipt, GoodsReceiptItem, SupplierInvoice	5
+Customer / Fiado	Customer, CustomerSegment, CustomerCreditLimit, CreditTransaction, FiadoPayment, CustomerStatement	6
+Supplier	Supplier, SupplierContact, SupplierRating	3
+Financial	TaxRate, TaxConfig, ExpenseCategory, Expense, DailyClosing	5
+AI	AIQuery, AIInsight, ProductEmbedding	3
+Sync	SyncQueue, SyncConflict, Device	3
+Settings	BusinessSettings, StoreSettings, ReceiptTemplate, Notification, NotificationPreference	5
+Supporting	Currency, PriceHistory, CostHistory, Recipe, RecipeIngredient, EmployeeSchedule, EmployeeAttendance, ReportTemplate, ReportExecution, ExportJob, BackupLog, ImportLog	12
+Security	Session, PasswordReset, LoginAttempt	3
+TOTAL		77 tables
+Note: With views, lookup tables, and junction tables for Phase 2 features (loyalty, integrations, plugins), the schema will expand to 100-120 tables. Phase 1 MVP uses 77 tables.
+16. Approval Gate
+Before Phase 3 (UI/UX Design) begins, the following must be approved:
+[ ] Table Count: 77 tables for Phase 1 accepted.
+[ ] UUID Strategy: All primary keys are UUIDs (not auto-increment).
+[ ] Soft Deletes: All tables use deletedAt — no hard deletes.
+[ ] Audit Columns: createdAt/updatedAt/createdBy/updatedBy/version on every table accepted.
+[ ] Tenant Isolation: Every table has businessId for multi-tenancy.
+[ ] Dual DB: PostgreSQL (cloud) + SQLite (local via IndexedDB) strategy accepted.
+[ ] Indexes: Critical composite indexes listed above accepted.
+[ ] Constraints: Check constraints and unique constraints accepted.
