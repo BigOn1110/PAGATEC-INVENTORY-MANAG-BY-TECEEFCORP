@@ -1,6 +1,6 @@
 
 
-# PAGATEC-INVENTORY-MANAG-BY-TECEEFCORP
+# pagatec-inventory
 
 ## Product Vision & Business Requirements Document (Phase 0)
 
